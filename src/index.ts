@@ -29,9 +29,7 @@ export default {
             const commandName = interaction.data.name;
             const options = interaction.data.options || [];
 
-            // ----------------------------------------------------
             // 1. /remind コマンド
-            // ----------------------------------------------------
             if (commandName === "remind") {
                 const dateInput = options.find((o: any) => o.name === "date").value;
                 const timeOption = options.find((o: any) => o.name === "time");
@@ -70,9 +68,7 @@ export default {
                 }), { headers: { "Content-Type": "application/json" } });
             }
 
-            // ----------------------------------------------------
             // 2. /list-reminders コマンド
-            // ----------------------------------------------------
             if (commandName === "list-reminders") {
                 const list = await env.REMINDERS.list({ prefix: "remind:" });
                 
@@ -85,7 +81,6 @@ export default {
 
                 let responseText = "📋 **現在予約中のリマインド一覧:**\n\n";
                 for (const key of list.keys) {
-                    // ★ エラー原因への対策: 生データとして取得し、安全にパースする
                     const rawData: any = await env.REMINDERS.get(key.name);
                     let messageContent = "";
                     
@@ -93,7 +88,6 @@ export default {
                         const parsed = JSON.parse(rawData);
                         messageContent = parsed.message;
                     } catch (e) {
-                        // JSONじゃない古いデータの場合はそのまま表示
                         messageContent = `（古い形式のデータ）: ${rawData}`;
                     }
                     
@@ -110,9 +104,7 @@ export default {
                 }), { headers: { "Content-Type": "application/json" } });
             }
 
-            // ----------------------------------------------------
             // 3. /cancel コマンド
-            // ----------------------------------------------------
             if (commandName === "cancel") {
                 const targetKey = options.find((o: any) => o.name === "id").value;
                 
@@ -136,31 +128,45 @@ export default {
     },
 
     // ----------------------------------------------------
-    // 定期実行 (1分ごと)
+    // 定期実行 (1分ごと): 取りこぼし防止仕様
     // ----------------------------------------------------
     async scheduled(event: any, env: Env, ctx: any) {
         const now = new Date();
-        const currentMinuteKey = `remind:${now.toISOString().substring(0, 16)}`;
 
-        const data = await env.REMINDERS.get(currentMinuteKey);
-        if (data) {
-            // ★ ここも古いデータで落ちないように安全対策
-            let messageContent = data; 
-            try {
-                const parsed = JSON.parse(data);
-                messageContent = parsed.message;
-            } catch (e) {
-                // 古いデータの場合はそのままメッセージにする
+        // 1. まず「remind:」から始まるキーを全部持ってくる
+        const list = await env.REMINDERS.list({ prefix: "remind:" });
+
+        for (const key of list.keys) {
+            // 2. キー名から時間を復元する (例: "remind:2026-05-02T04:00" -> "2026-05-02T04:00:00Z")
+            const utcString = key.name.replace("remind:", "") + ":00Z";
+            const remindTime = new Date(utcString);
+
+            // 3. 予定の時間が「現在時刻と同じ」または「過去」になっているか判定
+            if (remindTime.getTime() <= now.getTime()) {
+                
+                // 条件を満たしていれば中身を取得して送信
+                const data: any = await env.REMINDERS.get(key.name);
+                if (data) {
+                    let messageContent = data; 
+                    try {
+                        const parsed = JSON.parse(data);
+                        messageContent = parsed.message;
+                    } catch (e) {
+                        // 古いデータ形式のフォールバック
+                    }
+
+                    await fetch(env.DISCORD_WEBHOOK_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            content: `@everyone 【リマインド】\n${messageContent}` 
+                        }),
+                    });
+
+                    // 4. 無事に送信できたらKVから削除する
+                    await env.REMINDERS.delete(key.name);
+                }
             }
-
-            await fetch(env.DISCORD_WEBHOOK_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    content: `@everyone 【リマインド】\n${messageContent}` 
-                }),
-            });
-            await env.REMINDERS.delete(currentMinuteKey);
         }
     },
 };
